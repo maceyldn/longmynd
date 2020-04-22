@@ -72,6 +72,7 @@ void *loop_ts(void *arg) {
     thread_vars_t *thread_vars=(thread_vars_t *)arg;
     uint8_t *err = &thread_vars->thread_err;
     longmynd_config_t *config = thread_vars->config;
+    longmynd_status_t *status = thread_vars->status;
 
     uint8_t *buffer;
     uint16_t len=0;
@@ -99,6 +100,19 @@ void *loop_ts(void *arg) {
             do {
                 if (*err==ERROR_NONE) *err=ftdi_usb_ts_read(buffer, &len, TS_FRAME_SIZE);
             } while (*err==ERROR_NONE && len>2);
+
+            pthread_mutex_lock(&status->mutex);
+                
+            status->service_name[0] = '\0';
+            status->service_provider_name[0] = '\0';
+            status->ts_null_percentage = 100;
+
+            for (int j=0; j<NUM_ELEMENT_STREAMS; j++) {
+                status->ts_elementary_streams[j][0] = 0;
+            }
+
+            pthread_mutex_unlock(&status->mutex);
+
            config->ts_reset = false; 
         }
 
