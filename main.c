@@ -148,6 +148,15 @@ void config_set_lnbv(bool enabled, bool horizontal)
     pthread_mutex_unlock(&longmynd_config.mutex);
 }
 
+void config_reinit(void)
+{
+    pthread_mutex_lock(&longmynd_config.mutex);
+
+    longmynd_config.new = true;
+
+    pthread_mutex_unlock(&longmynd_config.mutex);
+}
+
 /* -------------------------------------------------------------------------------------------------- */
 uint64_t monotonic_ms(void) {
 /* -------------------------------------------------------------------------------------------------- */
@@ -449,6 +458,8 @@ void *loop_i2c(void *arg) {
                 *err=stv0910_start_scan(STV0910_DEMOD_TOP);
                 status_cpy.state=STATE_DEMOD_HUNTING;
             }
+
+            status_cpy.last_lock_or_init_monotonic = monotonic_ms();
         }
 
         /* Main receiver state machine */
@@ -534,6 +545,12 @@ void *loop_i2c(void *arg) {
                 break;
         }
 
+        if(status_cpy.state == STATE_DEMOD_S
+            || status_cpy.state == STATE_DEMOD_S2)
+        {
+            status_cpy.last_lock_or_init_monotonic = monotonic_ms();
+        }
+
         /* Copy local status data over global object */
         pthread_mutex_lock(&status->mutex);
 
@@ -560,6 +577,7 @@ void *loop_i2c(void *arg) {
         status->modcod = status_cpy.modcod;
         status->short_frame = status_cpy.short_frame;
         status->pilots = status_cpy.pilots;
+        status->last_lock_or_init_monotonic = status_cpy.last_lock_or_init_monotonic;
 
         /* Set monotonic value to signal new data */
         status->last_updated_monotonic = monotonic_ms();
@@ -762,6 +780,18 @@ int main(int argc, char *argv[]) {
             || thread_vars_beep.thread_err!=ERROR_NONE
             || thread_vars_i2c.thread_err!=ERROR_NONE)) {
             err=ERROR_THREAD_ERROR;
+        }
+
+        if(monotonic_ms() > (longmynd_status.last_lock_or_init_monotonic + LOCK_REINIT_TIMER))
+        {
+            /* Had a while with no lock, reinit config to pull NIM search loops back in */
+            printf("Flow: No-lock timeout, re-init config.\n");
+            config_reinit();
+
+            /* We've queued up a reinit so reset the timer */
+            pthread_mutex_lock(&longmynd_status.mutex);
+            longmynd_status.last_lock_or_init_monotonic = monotonic_ms();
+            pthread_mutex_unlock(&longmynd_status.mutex);
         }
     }
 
