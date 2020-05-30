@@ -66,6 +66,9 @@
 
 #define NUM_ELEMENT_STREAMS 16
 
+/* Timer to reset the NIM after a long time after init with no lock, in milliseconds */
+#define LOCK_REINIT_TIMER   (10*1000)
+
 typedef struct {
     bool port_swap;
     uint8_t port;
@@ -121,6 +124,7 @@ typedef struct {
     uint32_t modcod;
     bool short_frame;
     bool pilots;
+    uint64_t last_lock_or_init_monotonic;
 
     uint64_t last_updated_monotonic;
     pthread_mutex_t mutex;
@@ -141,6 +145,7 @@ void config_set_frequency(uint32_t frequency);
 void config_set_symbolrate(uint32_t symbolrate);
 void config_set_frequency_and_symbolrate(uint32_t frequency, uint32_t symbolrate);
 void config_set_lnbv(bool enabled, bool horizontal);
+void config_reinit(void);
 
 #endif
 
