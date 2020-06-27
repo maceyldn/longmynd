@@ -66,7 +66,7 @@ static longmynd_config_t longmynd_config = {
 static longmynd_status_t longmynd_status = {
     .service_name = "\0",
     .service_provider_name = "\0",
-    .new = false,
+    .last_updated_monotonic = 0,
     .mutex = PTHREAD_MUTEX_INITIALIZER,
     .signal = PTHREAD_COND_INITIALIZER
 };
@@ -89,6 +89,83 @@ uint64_t timestamp_ms(void) {
     struct timespec tp;
 
     if(clock_gettime(CLOCK_REALTIME, &tp) != 0)
+    {
+        return 0;
+    }
+
+    return (uint64_t) tp.tv_sec * 1000 + tp.tv_nsec / 1000000;
+}
+
+void config_set_frequency(uint32_t frequency)
+{
+    if (frequency <= 2450000 && frequency >= 144000)
+    {
+        pthread_mutex_lock(&longmynd_config.mutex);
+
+        longmynd_config.freq_requested = frequency;
+        longmynd_config.new = true;
+
+        pthread_mutex_unlock(&longmynd_config.mutex);
+    }
+}
+
+void config_set_symbolrate(uint32_t symbolrate)
+{
+    if (symbolrate <= 27500 && symbolrate >= 33)
+    {
+        pthread_mutex_lock(&longmynd_config.mutex);
+
+        longmynd_config.sr_requested = symbolrate;
+        longmynd_config.new = true;
+
+        pthread_mutex_unlock(&longmynd_config.mutex);
+    }
+}
+
+void config_set_frequency_and_symbolrate(uint32_t frequency, uint32_t symbolrate)
+{
+    if (frequency <= 2450000 && frequency >= 144000
+        && symbolrate <= 27500 && symbolrate >= 33)
+    {
+        pthread_mutex_lock(&longmynd_config.mutex);
+
+        longmynd_config.freq_requested = frequency;
+        longmynd_config.sr_requested = symbolrate;
+        longmynd_config.new = true;
+
+        pthread_mutex_unlock(&longmynd_config.mutex);
+    }
+}
+
+void config_set_lnbv(bool enabled, bool horizontal)
+{
+    pthread_mutex_lock(&longmynd_config.mutex);
+
+    longmynd_config.polarisation_supply = enabled;
+    longmynd_config.polarisation_horizontal = horizontal;
+    longmynd_config.new = true;
+
+    pthread_mutex_unlock(&longmynd_config.mutex);
+}
+
+void config_reinit(void)
+{
+    pthread_mutex_lock(&longmynd_config.mutex);
+
+    longmynd_config.new = true;
+
+    pthread_mutex_unlock(&longmynd_config.mutex);
+}
+
+/* -------------------------------------------------------------------------------------------------- */
+uint64_t monotonic_ms(void) {
+/* -------------------------------------------------------------------------------------------------- */
+/* Returns current value of a monotonic timer in milliseconds                                         */
+/* return: monotonic timer in milliseconds                                                            */
+/* -------------------------------------------------------------------------------------------------- */
+    struct timespec tp;
+
+    if(clock_gettime(CLOCK_MONOTONIC, &tp) != 0)
     {
         return 0;
     }
@@ -292,9 +369,18 @@ uint8_t do_report(longmynd_status_t *status) {
     /* BER */
     if (err==ERROR_NONE) err=stv0910_read_ber(STV0910_DEMOD_TOP, &status->bit_error_rate);
 
+    /* BCH Uncorrected Flag */
+    if (err==ERROR_NONE) err=stv0910_read_errors_bch_uncorrected(STV0910_DEMOD_TOP, &status->errors_bch_uncorrected);
+
+    /* BCH Error Count */
+    if (err==ERROR_NONE) err=stv0910_read_errors_bch_count(STV0910_DEMOD_TOP, &status->errors_bch_count);
+
+    /* LDPC Error Count */
+    if (err==ERROR_NONE) err=stv0910_read_errors_ldpc_count(STV0910_DEMOD_TOP, &status->errors_ldpc_count);
+
     /* MER */
-    if(status->state==STATE_DEMOD_S2) {
-        if (err==ERROR_NONE) err=stv0910_read_dvbs2_mer(STV0910_DEMOD_TOP, &status->modulation_error_rate);
+    if(status->state==STATE_DEMOD_S || status->state==STATE_DEMOD_S2) {
+        if (err==ERROR_NONE) err=stv0910_read_mer(STV0910_DEMOD_TOP, &status->modulation_error_rate);
     } else {
         status->modulation_error_rate = 0;
     }
@@ -362,12 +448,18 @@ void *loop_i2c(void *arg) {
 
             /* Enable/Disable polarisation voltage supply */
             if (*err==ERROR_NONE) *err=ftdi_set_polarisation_supply(config_cpy.polarisation_supply, config_cpy.polarisation_horizontal);
+            if (*err==ERROR_NONE) {
+                status_cpy.polarisation_supply = config_cpy.polarisation_supply;
+                status_cpy.polarisation_horizontal = config_cpy.polarisation_horizontal;
+            }
 
             /* now start the whole thing scanning for the signal */
             if (*err==ERROR_NONE) {
                 *err=stv0910_start_scan(STV0910_DEMOD_TOP);
                 status_cpy.state=STATE_DEMOD_HUNTING;
             }
+
+            status_cpy.last_lock_or_init_monotonic = monotonic_ms();
         }
 
         /* Main receiver state machine */
@@ -453,6 +545,12 @@ void *loop_i2c(void *arg) {
                 break;
         }
 
+        if(status_cpy.state == STATE_DEMOD_S
+            || status_cpy.state == STATE_DEMOD_S2)
+        {
+            status_cpy.last_lock_or_init_monotonic = monotonic_ms();
+        }
+
         /* Copy local status data over global object */
         pthread_mutex_lock(&status->mutex);
 
@@ -465,18 +563,24 @@ void *loop_i2c(void *arg) {
         status->power_q = status_cpy.power_q;
         status->frequency_requested = status_cpy.frequency_requested;
         status->frequency_offset = status_cpy.frequency_offset;
+        status->polarisation_supply = status_cpy.polarisation_supply;
+        status->polarisation_horizontal = status_cpy.polarisation_horizontal;
         status->symbolrate = status_cpy.symbolrate;
         status->viterbi_error_rate = status_cpy.viterbi_error_rate;
         status->bit_error_rate = status_cpy.bit_error_rate;
         status->modulation_error_rate = status_cpy.modulation_error_rate;
+        status->errors_bch_uncorrected = status_cpy.errors_bch_uncorrected;
+        status->errors_bch_count = status_cpy.errors_bch_count;
+        status->errors_ldpc_count = status_cpy.errors_ldpc_count;
         memcpy(status->constellation, status_cpy.constellation, (sizeof(uint8_t) * NUM_CONSTELLATIONS * 2));
         status->puncture_rate = status_cpy.puncture_rate;
         status->modcod = status_cpy.modcod;
         status->short_frame = status_cpy.short_frame;
         status->pilots = status_cpy.pilots;
+        status->last_lock_or_init_monotonic = status_cpy.last_lock_or_init_monotonic;
 
-        /* Set new data flag */
-        status->new = true;
+        /* Set monotonic value to signal new data */
+        status->last_updated_monotonic = monotonic_ms();
         /* Trigger pthread signal */
         pthread_cond_signal(&status->signal);
         pthread_mutex_unlock(&status->mutex);
@@ -513,6 +617,10 @@ uint8_t status_all_write(longmynd_status_t *status, uint8_t (*status_write)(uint
     /* carrier frequency offset we are trying */
     /* note we now have the offset, so we need to add in the freq we tried to set it to */
     if (err==ERROR_NONE) err=status_write(STATUS_CARRIER_FREQUENCY, (uint32_t)(status->frequency_requested+(status->frequency_offset/1000)));
+    /* LNB Voltage Supply Enabled: true / false */
+    if (err==ERROR_NONE) err=status_write(STATUS_LNB_SUPPLY, status->polarisation_supply);
+    /* LNB Voltage Supply is Horizontal Polarisation: true / false */
+    if (err==ERROR_NONE) err=status_write(STATUS_LNB_POLARISATION_H, status->polarisation_horizontal);
     /* symbol rate we are trying */
     if (err==ERROR_NONE) err=status_write(STATUS_SYMBOL_RATE, status->symbolrate);
     /* viterbi error rate */
@@ -521,6 +629,12 @@ uint8_t status_all_write(longmynd_status_t *status, uint8_t (*status_write)(uint
     if (err==ERROR_NONE) err=status_write(STATUS_BER, status->bit_error_rate);
     /* MER */
     if (err==ERROR_NONE) err=status_write(STATUS_MER, status->modulation_error_rate);
+    /* BCH Uncorrected Errors Flag */
+    if (err==ERROR_NONE) err=status_write(STATUS_ERRORS_BCH_UNCORRECTED, status->errors_bch_uncorrected);
+    /* BCH Corrected Errors Count */
+    if (err==ERROR_NONE) err=status_write(STATUS_ERRORS_BCH_COUNT, status->errors_bch_count);
+    /* LDPC Corrected Errors Count */
+    if (err==ERROR_NONE) err=status_write(STATUS_ERRORS_LDPC_COUNT, status->errors_ldpc_count);
     /* Service Name */
     if (err==ERROR_NONE) err=status_string_write(STATUS_SERVICE_NAME, status->service_name);
     /* Service Provider Name */
@@ -575,6 +689,7 @@ int main(int argc, char *argv[]) {
 
     thread_vars_t thread_vars_ts = {
         .main_err_ptr = &err,
+        .thread_err = ERROR_NONE,
         .config = &longmynd_config,
         .status = &longmynd_status
     };
@@ -590,6 +705,7 @@ int main(int argc, char *argv[]) {
 
     thread_vars_t thread_vars_ts_parse = {
         .main_err_ptr = &err,
+        .thread_err = ERROR_NONE,
         .config = &longmynd_config,
         .status = &longmynd_status
     };
@@ -605,6 +721,7 @@ int main(int argc, char *argv[]) {
 
     thread_vars_t thread_vars_i2c = {
         .main_err_ptr = &err,
+        .thread_err = ERROR_NONE,
         .config = &longmynd_config,
         .status = &longmynd_status
     };
@@ -620,6 +737,7 @@ int main(int argc, char *argv[]) {
 
     thread_vars_t thread_vars_beep = {
         .main_err_ptr = &err,
+        .thread_err = ERROR_NONE,
         .config = &longmynd_config,
         .status = &longmynd_status
     };
@@ -633,21 +751,24 @@ int main(int argc, char *argv[]) {
         pthread_setname_np(thread_beep, "Beep Audio");
     }
 
+    uint64_t last_status_sent_monotonic = 0;
     longmynd_status_t longmynd_status_cpy;
 
     while (err==ERROR_NONE) {
         /* Test if new status data is available */
-        if(longmynd_status.new) {
-            /* Acquire lock on status struct */
+        if(longmynd_status.last_updated_monotonic != last_status_sent_monotonic) {
+            /* Acquire lock on global status struct */
             pthread_mutex_lock(&longmynd_status.mutex);
             /* Clone status struct locally */
             memcpy(&longmynd_status_cpy, &longmynd_status, sizeof(longmynd_status_t));
-            /* Clear new flag on status struct */
-            longmynd_status.new = false;
+            /* Release lock on global status struct */
             pthread_mutex_unlock(&longmynd_status.mutex);
 
             /* Send all status via configured output interface from local copy */
             err=status_all_write(&longmynd_status_cpy, status_write, status_string_write);
+
+            /* Update monotonic timestamp last sent */
+            last_status_sent_monotonic = longmynd_status_cpy.last_updated_monotonic;
         } else {
             /* Sleep 10ms */
             usleep(10*1000);
@@ -659,6 +780,18 @@ int main(int argc, char *argv[]) {
             || thread_vars_beep.thread_err!=ERROR_NONE
             || thread_vars_i2c.thread_err!=ERROR_NONE)) {
             err=ERROR_THREAD_ERROR;
+        }
+
+        if(monotonic_ms() > (longmynd_status.last_lock_or_init_monotonic + LOCK_REINIT_TIMER))
+        {
+            /* Had a while with no lock, reinit config to pull NIM search loops back in */
+            printf("Flow: No-lock timeout, re-init config.\n");
+            config_reinit();
+
+            /* We've queued up a reinit so reset the timer */
+            pthread_mutex_lock(&longmynd_status.mutex);
+            longmynd_status.last_lock_or_init_monotonic = monotonic_ms();
+            pthread_mutex_unlock(&longmynd_status.mutex);
         }
     }
 
