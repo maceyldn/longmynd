@@ -139,8 +139,6 @@ typedef struct {
     longmynd_status_t *status;
 } thread_vars_t;
 
-uint64_t timestamp_ms(void);
-
 void config_set_frequency(uint32_t frequency);
 void config_set_symbolrate(uint32_t symbolrate);
 void config_set_frequency_and_symbolrate(uint32_t frequency, uint32_t symbolrate);

@@ -80,22 +80,6 @@ static pthread_t thread_beep;
 /* ----------------- ROUTINES ----------------------------------------------------------------------- */
 /* -------------------------------------------------------------------------------------------------- */
 
-/* -------------------------------------------------------------------------------------------------- */
-uint64_t timestamp_ms(void) {
-/* -------------------------------------------------------------------------------------------------- */
-/* Returns the current unix timestamp in milliseconds                                                 */
-/* return: unix timestamp in milliseconds                                                             */
-/* -------------------------------------------------------------------------------------------------- */
-    struct timespec tp;
-
-    if(clock_gettime(CLOCK_REALTIME, &tp) != 0)
-    {
-        return 0;
-    }
-
-    return (uint64_t) tp.tv_sec * 1000 + tp.tv_nsec / 1000000;
-}
-
 void config_set_frequency(uint32_t frequency)
 {
     if (frequency <= 2450000 && frequency >= 144000)
@@ -412,13 +396,13 @@ void *loop_i2c(void *arg) {
     longmynd_config_t config_cpy;
     longmynd_status_t status_cpy;
 
-    uint64_t last_i2c_loop = timestamp_ms();
+    uint64_t last_i2c_loop = monotonic_ms();
     while (*err==ERROR_NONE && *thread_vars->main_err_ptr==ERROR_NONE) {
         /* Receiver State Machine Loop Timer */
         do {
             /* Sleep for at least 10ms */
             usleep(10*1000);
-        } while (timestamp_ms() < (last_i2c_loop + I2C_LOOP_MS));
+        } while (monotonic_ms() < (last_i2c_loop + I2C_LOOP_MS));
 
         /* Check if there's a new config */
         if(thread_vars->config->new)
@@ -585,7 +569,7 @@ void *loop_i2c(void *arg) {
         pthread_cond_signal(&status->signal);
         pthread_mutex_unlock(&status->mutex);
 
-        last_i2c_loop = timestamp_ms();
+        last_i2c_loop = monotonic_ms();
     }
     return NULL;
 }
