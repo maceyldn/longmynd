@@ -210,27 +210,27 @@ uint8_t process_command_line(int argc, char *argv[], longmynd_config_t *config) 
                 main_usb_set=true;
                 break;
             case 'i':
-                strncpy(config->ts_ip_addr,argv[param++], 16);
+                strncpy(config->ts_ip_addr,argv[param++], (16-1));
                 config->ts_ip_port=(uint16_t)strtol(argv[param],NULL,10);
                 config->ts_use_ip=true;
                 ts_ip_set = true;
                 break;
             case 't':
-                strncpy(config->ts_fifo_path, argv[param], 128);
+                strncpy(config->ts_fifo_path, argv[param], (128-1));
                 ts_fifo_set=true;
                 break;
             case 'I':
-                strncpy(config->status_ip_addr,argv[param++], 16);
+                strncpy(config->status_ip_addr,argv[param++], (16-1));
                 config->status_ip_port=(uint16_t)strtol(argv[param],NULL,10);
                 config->status_use_ip=true;
                 status_ip_set = true;
                 break;
             case 's':
-                strncpy(config->status_fifo_path, argv[param], 128);
+                strncpy(config->status_fifo_path, argv[param], (128-1));
                 status_fifo_set=true;
                 break;
             case 'p':
-                strncpy(polarisation_str, argv[param], 8);
+                strncpy(polarisation_str, argv[param], (8-1));
                 config->polarisation_supply=true;
                 break;
             case 'w':
