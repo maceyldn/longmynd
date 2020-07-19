@@ -106,6 +106,7 @@ void *loop_ts(void *arg) {
             status->service_name[0] = '\0';
             status->service_provider_name[0] = '\0';
             status->ts_null_percentage = 100;
+            status->ts_packet_count = 0;
 
             for (int j=0; j<NUM_ELEMENT_STREAMS; j++) {
                 status->ts_elementary_streams[j][0] = 0;
@@ -514,6 +515,7 @@ void *loop_ts_parse(void *arg) {
         {
             status->ts_null_percentage = (100 * ts_packet_null_count) / ts_packet_total_count;
         }
+        status->ts_packet_count += ts_packet_total_count;
 
         /* Trigger pthread signal */
         pthread_cond_signal(&status->signal);

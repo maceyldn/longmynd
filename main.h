@@ -120,6 +120,7 @@ typedef struct {
     char service_name[255];
     char service_provider_name[255];
     uint8_t ts_null_percentage;
+    uint32_t ts_packet_count;
     uint16_t ts_elementary_streams[NUM_ELEMENT_STREAMS][2]; // { pid, type }
     uint32_t modcod;
     bool short_frame;
