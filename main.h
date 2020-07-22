@@ -66,8 +66,8 @@
 
 #define NUM_ELEMENT_STREAMS 16
 
-/* Timer to reset the NIM after a long time after init with no lock, in milliseconds */
-#define LOCK_REINIT_TIMER   (10*1000)
+/* Timer to reset the NIM after a long time after init with no TS data, in milliseconds */
+#define NO_TS_REINIT_TIMER   (10*1000)
 
 typedef struct {
     bool port_swap;
@@ -120,16 +120,17 @@ typedef struct {
     char service_name[255];
     char service_provider_name[255];
     uint8_t ts_null_percentage;
-    uint32_t ts_packet_count;
     uint16_t ts_elementary_streams[NUM_ELEMENT_STREAMS][2]; // { pid, type }
     uint32_t modcod;
     bool short_frame;
     bool pilots;
-    uint64_t last_lock_or_init_monotonic;
+    uint64_t last_ts_or_reinit_monotonic;
 
     uint64_t last_updated_monotonic;
     pthread_mutex_t mutex;
     pthread_cond_t signal;
+
+    uint32_t ts_packet_count_nolock;
 } longmynd_status_t;
 
 typedef struct {

@@ -68,7 +68,8 @@ static longmynd_status_t longmynd_status = {
     .service_provider_name = "\0",
     .last_updated_monotonic = 0,
     .mutex = PTHREAD_MUTEX_INITIALIZER,
-    .signal = PTHREAD_COND_INITIALIZER
+    .signal = PTHREAD_COND_INITIALIZER,
+    .ts_packet_count_nolock = 0
 };
 
 static pthread_t thread_ts_parse;
@@ -396,6 +397,8 @@ void *loop_i2c(void *arg) {
     longmynd_config_t config_cpy;
     longmynd_status_t status_cpy;
 
+    uint32_t last_ts_packet_count = 0;
+
     uint64_t last_i2c_loop = monotonic_ms();
     while (*err==ERROR_NONE && *thread_vars->main_err_ptr==ERROR_NONE) {
         /* Receiver State Machine Loop Timer */
@@ -403,6 +406,8 @@ void *loop_i2c(void *arg) {
             /* Sleep for at least 10ms */
             usleep(10*1000);
         } while (monotonic_ms() < (last_i2c_loop + I2C_LOOP_MS));
+
+        status_cpy.last_ts_or_reinit_monotonic = 0;
 
         /* Check if there's a new config */
         if(thread_vars->config->new)
@@ -443,7 +448,7 @@ void *loop_i2c(void *arg) {
                 status_cpy.state=STATE_DEMOD_HUNTING;
             }
 
-            status_cpy.last_lock_or_init_monotonic = monotonic_ms();
+            status_cpy.last_ts_or_reinit_monotonic = monotonic_ms();
         }
 
         /* Main receiver state machine */
@@ -529,10 +534,11 @@ void *loop_i2c(void *arg) {
                 break;
         }
 
-        if(status_cpy.state == STATE_DEMOD_S
-            || status_cpy.state == STATE_DEMOD_S2)
+        if(status->ts_packet_count_nolock > 0
+            && last_ts_packet_count != status->ts_packet_count_nolock)
         {
-            status_cpy.last_lock_or_init_monotonic = monotonic_ms();
+            status_cpy.last_ts_or_reinit_monotonic = monotonic_ms();
+            last_ts_packet_count = status->ts_packet_count_nolock;
         }
 
         /* Copy local status data over global object */
@@ -561,7 +567,9 @@ void *loop_i2c(void *arg) {
         status->modcod = status_cpy.modcod;
         status->short_frame = status_cpy.short_frame;
         status->pilots = status_cpy.pilots;
-        status->last_lock_or_init_monotonic = status_cpy.last_lock_or_init_monotonic;
+        if(status_cpy.last_ts_or_reinit_monotonic != 0) {
+            status->last_ts_or_reinit_monotonic = status_cpy.last_ts_or_reinit_monotonic;
+        }
 
         /* Set monotonic value to signal new data */
         status->last_updated_monotonic = monotonic_ms();
@@ -766,15 +774,15 @@ int main(int argc, char *argv[]) {
             err=ERROR_THREAD_ERROR;
         }
 
-        if(monotonic_ms() > (longmynd_status.last_lock_or_init_monotonic + LOCK_REINIT_TIMER))
+        if(monotonic_ms() > (longmynd_status.last_ts_or_reinit_monotonic + NO_TS_REINIT_TIMER))
         {
-            /* Had a while with no lock, reinit config to pull NIM search loops back in */
-            printf("Flow: No-lock timeout, re-init config.\n");
+            /* Had a while with no TS data, reinit config to pull NIM search loops back in, or fix -S fascination */
+            printf("Flow: No-data timeout, re-init config.\n");
             config_reinit();
 
             /* We've queued up a reinit so reset the timer */
             pthread_mutex_lock(&longmynd_status.mutex);
-            longmynd_status.last_lock_or_init_monotonic = monotonic_ms();
+            longmynd_status.last_ts_or_reinit_monotonic = monotonic_ms();
             pthread_mutex_unlock(&longmynd_status.mutex);
         }
     }

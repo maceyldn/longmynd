@@ -106,7 +106,7 @@ void *loop_ts(void *arg) {
             status->service_name[0] = '\0';
             status->service_provider_name[0] = '\0';
             status->ts_null_percentage = 100;
-            status->ts_packet_count = 0;
+            status->ts_packet_count_nolock = 0;
 
             for (int j=0; j<NUM_ELEMENT_STREAMS; j++) {
                 status->ts_elementary_streams[j][0] = 0;
@@ -125,8 +125,8 @@ void *loop_ts(void *arg) {
             ts_write(&buffer[2],len-2);
 
             if(longmynd_ts_parse_buffer.waiting
-            	&& longmynd_ts_parse_buffer.buffer != NULL
-            	&& pthread_mutex_trylock(&longmynd_ts_parse_buffer.mutex) == 0)
+                && longmynd_ts_parse_buffer.buffer != NULL
+                && pthread_mutex_trylock(&longmynd_ts_parse_buffer.mutex) == 0)
             {
                 memcpy(longmynd_ts_parse_buffer.buffer, &buffer[2],len-2);
                 longmynd_ts_parse_buffer.length = len-2;
@@ -135,7 +135,10 @@ void *loop_ts(void *arg) {
 
                 pthread_mutex_unlock(&longmynd_ts_parse_buffer.mutex);
             }
+
+            status->ts_packet_count_nolock += (len-2);
         }
+
     }
 
     free(buffer);
@@ -515,7 +518,6 @@ void *loop_ts_parse(void *arg) {
         {
             status->ts_null_percentage = (100 * ts_packet_null_count) / ts_packet_total_count;
         }
-        status->ts_packet_count += ts_packet_total_count;
 
         /* Trigger pthread signal */
         pthread_cond_signal(&status->signal);
