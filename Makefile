@@ -6,6 +6,9 @@ ifndef CC
 CC = gcc
 endif
 
+# Build parallel
+MAKEFLAGS += -j$(shell nproc || printf 1)
+
 COPT = -O3 -march=native -mtune=native
 # Help detection for ARM SBCs, using devicetree
 F_CHECKDTMODEL = $(if $(findstring $(1),$(shell cat /sys/firmware/devicetree/base/model 2>/dev/null)),$(2))
