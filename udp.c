@@ -154,10 +154,16 @@ static uint8_t udp_init(struct sockaddr_in *servaddr_ptr, int *sockfd_ptr, char 
     } else {
         /* setup all the destination fields */
         memset(servaddr_ptr, 0, sizeof(struct sockaddr_in)); 
-        servaddr_ptr->sin_family = AF_INET; 
+	servaddr_ptr->sin_family = AF_INET; 
         servaddr_ptr->sin_port = htons(udp_port); 
         servaddr_ptr->sin_addr.s_addr = inet_addr(udp_ip); // INADDR_ANY; 
+
+	//Enable Multicast TTL
+	unsigned char ttl = 64; //64 should be enough
+        setsockopt(*sockfd_ptr, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl));
     }
+
+    
     if (err!=ERROR_NONE) printf("ERROR: UDP init\n");
 
     return err;
