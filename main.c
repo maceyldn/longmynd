@@ -3,6 +3,7 @@
 /*    - an implementation of the Serit NIM controlling software for the MiniTiouner Hardware          */
 /*    - the top level (main) and command line procesing                                               */
 /* Copyright 2019 Heather Lomond                                                                      */
+/* Copyright 2020 Andy Mace (M0MUX)                                                                      */
 /* -------------------------------------------------------------------------------------------------- */
 /*
     This file is part of longmynd.
@@ -32,6 +33,8 @@
 #include <stdbool.h>
 #include <string.h>
 #include <pthread.h>
+#include <sys/utsname.h>
+#include <sys/socket.h>
 #include "main.h"
 #include "ftdi.h"
 #include "stv0910.h"
@@ -44,6 +47,7 @@
 #include "fifo.h"
 #include "ftdi_usb.h"
 #include "udp.h"
+#include "udp_rcv.h"
 #include "beep.h"
 #include "ts.h"
 
@@ -75,6 +79,7 @@ static pthread_t thread_ts_parse;
 static pthread_t thread_ts;
 static pthread_t thread_i2c;
 static pthread_t thread_beep;
+static pthread_t thread_rcv;
 
 /* -------------------------------------------------------------------------------------------------- */
 /* ----------------- ROUTINES ----------------------------------------------------------------------- */
@@ -396,6 +401,10 @@ uint8_t do_report(longmynd_status_t *status) {
     return err;
 }
 
+
+
+
+
 /* -------------------------------------------------------------------------------------------------- */
 void *loop_i2c(void *arg) {
 /* -------------------------------------------------------------------------------------------------- */
@@ -685,6 +694,9 @@ int main(int argc, char *argv[]) {
         status_string_write = fifo_status_string_write;
     }
 
+    if (err==ERROR_NONE) err=udp_rcv_init("239.200.200.1", 6789);
+
+    
     if (err==ERROR_NONE) err=ftdi_init(longmynd_config.device_usb_bus, longmynd_config.device_usb_addr);
 
     thread_vars_t thread_vars_ts = {
@@ -751,6 +763,25 @@ int main(int argc, char *argv[]) {
         pthread_setname_np(thread_beep, "Beep Audio");
     }
 
+
+    thread_vars_t thread_vars_rcv = {
+        .main_err_ptr = &err,
+        .thread_err = ERROR_NONE,
+        .config = &longmynd_config,
+        .status = &longmynd_status
+    };
+
+    if(0 != pthread_create(&thread_rcv, NULL, loop_rcv, (void *)&thread_vars_rcv))
+    {
+        fprintf(stderr, "Error creating loop_ts pthread\n");
+    }
+    else
+    {
+        pthread_setname_np(thread_ts, "Control Rcv");
+    }
+
+
+    
     uint64_t last_status_sent_monotonic = 0;
     longmynd_status_t longmynd_status_cpy;
 
@@ -800,6 +831,7 @@ int main(int argc, char *argv[]) {
     pthread_join(thread_ts, NULL);
     pthread_join(thread_i2c, NULL);
     pthread_join(thread_beep, NULL);
+    pthread_join(thread_rcv, NULL);
 
     return err;
 }

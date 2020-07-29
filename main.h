@@ -139,6 +139,21 @@ typedef struct {
     longmynd_status_t *status;
 } thread_vars_t;
 
+typedef struct {
+    uint32_t frequency;
+    uint32_t offset;
+    uint32_t doppler;
+    uint32_t SRate;
+    uint32_t WideScan;
+    uint32_t LowSR;
+    char DVBmode[20];
+    char FPlugA[20];
+    bool Voltage; // false -> 13V, true -> 18V
+    bool khz; 
+} ctrl_message_t;
+
+
+
 uint64_t timestamp_ms(void);
 
 void config_set_frequency(uint32_t frequency);
