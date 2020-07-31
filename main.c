@@ -184,6 +184,7 @@ uint8_t process_command_line(int argc, char *argv[], longmynd_config_t *config) 
     strcpy(config->status_fifo_path, "longmynd_main_status");
     config->polarisation_supply=false;
     char polarisation_str[8];
+    config->ts_timeout = 5*1000;
 
     param=1;
     while (param<argc-2) {
@@ -225,6 +226,9 @@ uint8_t process_command_line(int argc, char *argv[], longmynd_config_t *config) 
             case 'b':
                 config->beep_enabled=true;
                 param--; /* there is no data for this so go back */
+                break;
+            case 'r':
+                config->ts_timeout=strtol(argv[param],NULL,10);
                 break;
           }
         }
@@ -287,6 +291,9 @@ uint8_t process_command_line(int argc, char *argv[], longmynd_config_t *config) 
         } else if (config->ts_use_ip && config->status_use_ip && (config->ts_ip_port == config->status_ip_port) && (0==strcmp(config->ts_ip_addr, config->status_ip_addr))) {
             err=ERROR_ARGS_INPUT;
             printf("ERROR: Cannot set Status IP & Port identical to TS IP & Port\n");
+        } else if (config->ts_timeout != -1 && config->ts_timeout<=500) {
+            err=ERROR_ARGS_INPUT;
+            printf("ERROR: TS Timeout if enabled must be >500ms.\n");
         } else { /* err==ERROR_NONE */
              printf("      Status: Main Frequency=%i KHz\n",config->freq_requested);
              printf("              Main Symbol Rate=%i KSymbols/s\n",config->sr_requested);
@@ -300,6 +307,8 @@ uint8_t process_command_line(int argc, char *argv[], longmynd_config_t *config) 
              else                     printf("              Main refers to TOP F-Type\n");
              if (config->beep_enabled) printf("              MER Beep enabled\n");
              if (config->polarisation_supply) printf("              Polarisation Voltage Supply enabled: %s\n", (config->polarisation_horizontal ? "H, 18V" : "V, 13V"));
+             if (config->ts_timeout != -1) printf("              TS Timeout Period =%i milliseconds\n",config->ts_timeout);
+             else                          printf("              TS Timeout Disabled.\n");
         }
     }
 
@@ -774,7 +783,8 @@ int main(int argc, char *argv[]) {
             err=ERROR_THREAD_ERROR;
         }
 
-        if(monotonic_ms() > (longmynd_status.last_ts_or_reinit_monotonic + NO_TS_REINIT_TIMER))
+        if(longmynd_config.ts_timeout != -1
+        	&& monotonic_ms() > (longmynd_status.last_ts_or_reinit_monotonic + longmynd_config.ts_timeout))
         {
             /* Had a while with no TS data, reinit config to pull NIM search loops back in, or fix -S fascination */
             printf("Flow: No-data timeout, re-init config.\n");

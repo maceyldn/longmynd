@@ -66,9 +66,6 @@
 
 #define NUM_ELEMENT_STREAMS 16
 
-/* Timer to reset the NIM after a long time after init with no TS data, in milliseconds */
-#define NO_TS_REINIT_TIMER   (10*1000)
-
 typedef struct {
     bool port_swap;
     uint8_t port;
@@ -92,6 +89,8 @@ typedef struct {
 
     bool polarisation_supply;
     bool polarisation_horizontal; // false -> 13V, true -> 18V
+
+    int ts_timeout;
 
     bool new;
     pthread_mutex_t mutex;
