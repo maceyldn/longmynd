@@ -85,15 +85,13 @@ void *loop_rcv(void *arg) {
       exit(1);
     }
 
-
     ctrl_message_t *p = malloc(sizeof(ctrl_message_t));
     sscanf( message, "[GlobalMsg],Freq=%u,Offset=%u,Doppler=%u,Srate=%u,WideScan=%u,LowSR=%u,DVBmode=%s,FPlug=%s,Voltage=%c,22khz=%c", &p->frequency, &p->offset, &p->doppler, &p->SRate, &p->WideScan, &p->LowSR, &p->DVBmode, &p->FPlugA, &p->Voltage?"true":"false", &p->khz?"true":"false" );
 
     uint32_t freq = (p->frequency - p->offset);
     config_set_frequency_and_symbolrate(freq, p->SRate);
-    config_reinit();
-
     config_set_lnbv(p->Voltage, p->khz);
+    config_reinit();
     
     printf("Retune: %s", message);
   }

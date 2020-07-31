@@ -220,7 +220,12 @@ uint8_t process_command_line(int argc, char *argv[], longmynd_config_t *config) 
                 config->ts_use_ip=true;
                 ts_ip_set = true;
                 break;
-            case 't':
+            case 'c':
+                strncpy(config->control_ip,argv[param++], 16);
+                config->control_port=(uint16_t)strtol(argv[param],NULL,10);
+                config->use_control=true;
+                break;
+	  case 't':
                 strncpy(config->ts_fifo_path, argv[param], 128);
                 ts_fifo_set=true;
                 break;
@@ -312,11 +317,16 @@ uint8_t process_command_line(int argc, char *argv[], longmynd_config_t *config) 
              printf("              Main Symbol Rate=%i KSymbols/s\n",config->sr_requested);
              if (!main_usb_set)       printf("              Using First Minitiouner detected on USB\n");
              else                     printf("              USB bus/device=%i,%i\n",config->device_usb_bus,config->device_usb_addr);
-             if (!config->ts_use_ip)  printf("              Main TS output to FIFO=%s\n",config->ts_fifo_path);
+
+	     if (!config->ts_use_ip)  printf("              Main TS output to FIFO=%s\n",config->ts_fifo_path);
              else                     printf("              Main TS output to IP=%s:%i\n",config->ts_ip_addr,config->ts_ip_port);
+
              if (!config->status_use_ip)  printf("              Main Status output to FIFO=%s\n",config->status_fifo_path);
              else                     printf("              Main Status output to IP=%s:%i\n",config->status_ip_addr,config->status_ip_port);
-             if (config->port_swap)   printf("              NIM inputs are swapped (Main now refers to BOTTOM F-Type\n");
+
+     	     if (config->use_control) printf("              Listening to %s:%i for Control\n",config->control_ip, config->control_port);
+	     
+	     if (config->port_swap)   printf("              NIM inputs are swapped (Main now refers to BOTTOM F-Type\n");
              else                     printf("              Main refers to TOP F-Type\n");
              if (config->beep_enabled) printf("              MER Beep enabled\n");
              if (config->polarisation_supply) printf("              Polarisation Voltage Supply enabled: %s\n", (config->polarisation_horizontal ? "H, 18V" : "V, 13V"));
@@ -694,9 +704,11 @@ int main(int argc, char *argv[]) {
         status_string_write = fifo_status_string_write;
     }
 
-    if (err==ERROR_NONE) err=udp_rcv_init("239.200.200.1", 6789);
-
-    
+    if(longmynd_config.use_control) {
+      printf("starting %b", longmynd_config.use_control);
+      if (err==ERROR_NONE) err=udp_rcv_init(longmynd_config.control_ip, longmynd_config.control_port);
+    }
+  
     if (err==ERROR_NONE) err=ftdi_init(longmynd_config.device_usb_bus, longmynd_config.device_usb_addr);
 
     thread_vars_t thread_vars_ts = {
@@ -764,6 +776,8 @@ int main(int argc, char *argv[]) {
     }
 
 
+    if (longmynd_config.use_control)
+    {
     thread_vars_t thread_vars_rcv = {
         .main_err_ptr = &err,
         .thread_err = ERROR_NONE,
@@ -773,13 +787,13 @@ int main(int argc, char *argv[]) {
 
     if(0 != pthread_create(&thread_rcv, NULL, loop_rcv, (void *)&thread_vars_rcv))
     {
-        fprintf(stderr, "Error creating loop_ts pthread\n");
+        fprintf(stderr, "Error creating loop_rcv pthread\n");
     }
     else
     {
         pthread_setname_np(thread_ts, "Control Rcv");
     }
-
+    }
 
     
     uint64_t last_status_sent_monotonic = 0;
@@ -831,7 +845,11 @@ int main(int argc, char *argv[]) {
     pthread_join(thread_ts, NULL);
     pthread_join(thread_i2c, NULL);
     pthread_join(thread_beep, NULL);
-    pthread_join(thread_rcv, NULL);
 
+    if (longmynd_config.use_control)
+    {
+      pthread_join(thread_rcv, NULL);
+    }
+    
     return err;
 }
