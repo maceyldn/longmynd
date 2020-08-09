@@ -755,6 +755,11 @@ int main(int argc, char *argv[]) {
     uint64_t last_status_sent_monotonic = 0;
     longmynd_status_t longmynd_status_cpy;
 
+    /* Initialise TS data re-init timer to prevent immediate reset */
+    pthread_mutex_lock(&longmynd_status.mutex);
+    longmynd_status.last_ts_or_reinit_monotonic = monotonic_ms();
+    pthread_mutex_unlock(&longmynd_status.mutex);
+
     while (err==ERROR_NONE) {
         /* Test if new status data is available */
         if(longmynd_status.last_updated_monotonic != last_status_sent_monotonic) {
