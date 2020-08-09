@@ -273,7 +273,7 @@ uint8_t process_command_line(int argc, char *argv[], longmynd_config_t *config) 
         if (config->freq_requested>2450000) {
             err=ERROR_ARGS_INPUT;
             printf("ERROR: Freq must be <= 2450 MHz\n");
-        } else if (config->freq_requested<144) {
+        } else if (config->freq_requested<144000) {
             err=ERROR_ARGS_INPUT;
             printf("ERROR: Freq_must be >= 144 MHz\n");
         } else if (config->sr_requested>27500) {
