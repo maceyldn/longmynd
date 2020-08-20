@@ -1,0 +1,30 @@
+name: Test Build Matrix
+
+on: [push]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-20.04, ubuntu-18.04]
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Install dependencies
+      shell: bash
+      run: |
+        # Install longmynd dependencies
+        sudo apt-get install libusb-1.0-0-dev libasound2-dev -y
+        # Install test matrix dependencies
+        sudo add-apt-repository ppa:ubuntu-toolchain-r/test -y
+        sudo apt-get update -q
+        sudo apt-get install gcc-7 gcc-8 gcc-9 gcc-10 -y
+
+    - name: Build longmynd
+      shell: bash
+      run: |
+        make clean && make werror GCC=gcc-7
+        make clean && make werror GCC=gcc-8
+        make clean && make werror GCC=gcc-9
+        make clean && make werror GCC=gcc-10
