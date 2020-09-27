@@ -228,7 +228,6 @@ uint8_t stv6120_set_freq(uint8_t tuner, uint32_t freq) {
         timeout=monotonic_ms()+STV6120_PLL_TIMEOUT_MS;
         do {
             err=stv6120_read_reg(tuner==TUNER_1 ? STV6120_STAT1 : STV6120_STAT2, &val);
-            timeout++;
         } while ((err==ERROR_NONE) &&
                  (monotonic_ms()<timeout) &&
                  ((val & (1<<STV6120_STAT1_LOCK_SHIFT)) != (STV6120_STAT1_LOCK_LOCKED << STV6120_STAT1_LOCK_SHIFT)));
