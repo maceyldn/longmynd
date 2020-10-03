@@ -29,11 +29,14 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <inttypes.h>
 #include "nim.h"
 #include "stv6120.h"
 #include "stv6120_regs.h"
 #include "stv6120_utils.h"
 #include "errors.h"
+
+extern uint64_t monotonic_ms(void);
 
 /* -------------------------------------------------------------------------------------------------- */
 /* ----------------- GLOBALS ------------------------------------------------------------------------ */
@@ -78,7 +81,7 @@ uint8_t stv6120_cal_lowpass(uint8_t tuner) {
 /* -------------------------------------------------------------------------------------------------- */
     uint8_t err=ERROR_NONE;
     uint8_t val;
-    uint16_t timeout;
+    uint64_t timeout;
 
     printf("Flow: Tuner cal lowpass\n");
 
@@ -90,16 +93,17 @@ uint8_t stv6120_cal_lowpass(uint8_t tuner) {
                                          (STV6120_STAT1_CALRCSTRT_START << STV6120_STAT1_CALRCSTRT_SHIFT));
     /* wait for the bit to be cleared  to say cal has finished*/
     if (err==ERROR_NONE) {
-        timeout=0;
+        timeout=monotonic_ms()+STV6120_LPFCAL_TIMEOUT_MS;
         do {
             err=stv6120_read_reg(STV6120_STAT1, &val); 
-            timeout++;
-            if (timeout==STV6120_CAL_TIMEOUT) {
+            if (monotonic_ms()>=timeout) {
                 err=ERROR_TUNER_CAL_LOWPASS_TIMEOUT;
                 printf("ERROR: tuner wait on CAL_lowpass timed out\n");
             }
         } while ((err==ERROR_NONE) && ((val & (1<<STV6120_STAT1_CALRCSTRT_SHIFT)) == (1<<STV6120_STAT1_CALRCSTRT_SHIFT)));
+        printf("Debug: LPF Cal took: %"PRIu64"ms\n", (monotonic_ms() - (timeout - STV6120_LPFCAL_TIMEOUT_MS)));
     }
+
     /* turn off the low pass filter clock (=1) */
     if (err==ERROR_NONE) err=stv6120_write_reg(tuner==TUNER_1 ? STV6120_CTRL7 : STV6120_CTRL16,
                                               (tuner==TUNER_1 ? ctrl7 : ctrl16));
@@ -107,6 +111,46 @@ uint8_t stv6120_cal_lowpass(uint8_t tuner) {
     if (err!=ERROR_NONE) printf("ERROR: Failed to cal lowpass filter\n");
 
     return err;
+}
+
+/* -------------------------------------------------------------------------------------------------- */
+void stv6120_calc_pll(uint32_t freq, uint8_t *p, uint32_t *f_vco, uint16_t *n, uint32_t *f, uint8_t *icp, uint8_t *cfhf) {
+/* -------------------------------------------------------------------------------------------------- */
+/* Calculates PLL coefficients for setting Tuner frequency                                            */
+/* -------------------------------------------------------------------------------------------------- */
+    uint8_t pos;
+
+    /* the global rdiv has already been set up in the init routines */
+
+    /* p is defined from the datasheet (note, this is reg value, not P) */
+    if      (freq<=STV6120_P_THRESHOLD_1) *p=3; /* P=16 */
+    else if (freq<=STV6120_P_THRESHOLD_2) *p=2; /* P= 8 */
+    else if (freq<=STV6120_P_THRESHOLD_3) *p=1; /* P= 4 */
+    else                                  *p=0; /* P= 2 */
+
+    /* we have to be careful of the size of the typesi in the following  */
+    /* F.vco=F.rf*P where F.rf=F.lo    all in KHz */
+    /* f_vco is uint32_t, so p_max is 3 (i.e P_max is 16), freq_max is 2500000KHz, results is 0x02625a00 ... OK */
+    *f_vco = freq<<((*p)+1);
+    /* n=integer(f_vco/f_xtal*R)  note: f_xtal and f_vco both in KHz */
+    /* we do the *R first (a shift by rdiv), and max is 0x04c4b400, then the divide and we are OK */
+    *n = (uint16_t)(((*f_vco) << rdiv) / NIM_TUNER_XTAL);
+    /* f = fraction(f_vco/f_xtal*R).2^18 */
+    /* as for n, we do the shift first (which we know is safe), then modulus to get the fraction */
+    /* then we have to go to 64 bits to do the shift and divide, and then back to uint32_t for the result */
+    *f = (uint32_t)(( ((uint64_t)(((*f_vco) << rdiv) % NIM_TUNER_XTAL)) << 18) / NIM_TUNER_XTAL);
+    
+    /* lookup the ICP value in the lookup table as per datasheet */
+    pos=0;
+    while (*f_vco > stv6120_icp_lookup[pos++][1]);
+    *icp=stv6120_icp_lookup[pos-1][2];
+
+    /* lookup the high freq filter cutoff setting as per datasheet */
+    (*cfhf)=0;
+    while ((3*freq/1000) <= stv6120_cfhf[*cfhf]) {
+        (*cfhf)++;
+    }
+    (*cfhf)--; /* we are sure it isn't greater then the first array element so this is safe */
 }
 
 /* -------------------------------------------------------------------------------------------------- */
@@ -121,118 +165,119 @@ uint8_t stv6120_set_freq(uint8_t tuner, uint32_t freq) {
 /* -------------------------------------------------------------------------------------------------- */
     uint8_t err=ERROR_NONE;
     uint8_t val;
-    uint8_t pos;
     uint32_t f;
     uint16_t n;
     uint8_t p;
     uint8_t icp;
     uint32_t f_vco;
-    uint16_t timeout;
+    uint64_t timeout;
+    uint32_t lock_attempts;
     uint8_t cfhf;
 
     printf("Flow: Tuner set freq\n");
 
-    /* the global rdiv has already been set up in the init routines */
-
-    /* p is defined from the datasheet (note, this is reg value, not P) */
-    if      (freq<=STV6120_P_THRESHOLD_1) p=3; /* P=16 */
-    else if (freq<=STV6120_P_THRESHOLD_2) p=2; /* P= 8 */
-    else if (freq<=STV6120_P_THRESHOLD_3) p=1; /* P= 4 */
-    else                                  p=0; /* P= 2 */
-
-    /* we have to be careful of the size of the typesi in the following  */
-    /* F.vco=F.rf*P where F.rf=F.lo    all in KHz */
-    /* f_vco is uint32_t, so p_max is 3 (i.e P_max is 16), freq_max is 2500000KHz, results is 0x02625a00 ... OK */
-    f_vco = freq<<(p+1);
-    /* n=integer(f_vco/f_xtal*R)  note: f_xtal and f_vco both in KHz */
-    /* we do the *R first (a shift by rdiv), and max is 0x04c4b400, then the divide and we are OK */
-    n = (uint16_t)((f_vco << rdiv) / NIM_TUNER_XTAL);
-    /* f = fraction(f_vco/f_xtal*R).2^18 */
-    /* as for n, we do the shift first (which we know is safe), then modulus to get the fraction */
-    /* then we have to go to 64 bits to do the shift and divide, and then back to uint32_t for the result */
-    f = (uint32_t)(( ((uint64_t)((f_vco << rdiv) % NIM_TUNER_XTAL)) << 18) / NIM_TUNER_XTAL);
-    
-    /* lookup the ICP value in the lookup table as per datasheet */
-    pos=0;
-    while (f_vco > stv6120_icp_lookup[pos++][1]);
-    icp=stv6120_icp_lookup[pos-1][2];
-
-    /* lookup the high freq filter cutoff setting as per datasheet */
-    cfhf=0;
-    while ((3*freq/1000) <= stv6120_cfhf[cfhf]) {
-        cfhf++;
-    }
-    cfhf--; /* we are sure it isn't greater then the first array element so this is safe */
+    stv6120_calc_pll(freq, &p, &f_vco, &n, &f, &icp, &cfhf);
 
     printf("      Status: tuner:%i, f_vco=0x%x, icp=0x%x, f=0x%x, n=0x%x,\n",tuner,f_vco,icp,f,n);
     printf("              rdiv=0x%x, p=0x%x, freq=%i, cfhf=%i\n",rdiv,p,freq,stv6120_cfhf[cfhf]);
 
-    /* now we fill in the PLL and ICP values */
-    if (err==ERROR_NONE) err=stv6120_write_reg(tuner==TUNER_1 ? STV6120_CTRL3 : STV6120_CTRL12,
-                                            (n & 0x00ff)               );      /* set N[7:0] */
-    if (err==ERROR_NONE) err=stv6120_write_reg(tuner==TUNER_1 ? STV6120_CTRL4 : STV6120_CTRL13,
-                                            ((f & 0x0000007f) << 1)    |       /* set F[6:0] */
-                                            ((n & 0x0100)   >> 8)      );      /* N[8] */
-    if (err==ERROR_NONE) err=stv6120_write_reg(tuner==TUNER_1 ? STV6120_CTRL5 : STV6120_CTRL14,
-                                            ((f & 0x00007f80) >> 7)    );      /* set F[14:7] */
-    if (err==ERROR_NONE) err=stv6120_write_reg(tuner==TUNER_1 ? STV6120_CTRL6 : STV6120_CTRL15,
-                                            ((f & 0x00038000) >> 15)   |       /* set f[17:15] */
-                                            (icp << STV6120_CTRL6_ICP_SHIFT) | /* ICP[2:0] */
-                                            STV6120_CTRL6_RESERVED     );      /* reserved bit */
+    lock_attempts = 3;
+    while(lock_attempts == 3 || (err == ERROR_TUNER_LOCK_TIMEOUT && lock_attempts > 0))
+    {
+        /* If we're resetting err here then it's because we're trying again */
+        if(err == ERROR_TUNER_LOCK_TIMEOUT)
+        {
+            printf("Flow: Attempting PLL again, %"PRIu32" attempts remaining\n", lock_attempts);
 
-    if (tuner==TUNER_1) {
-        if (err==ERROR_NONE) err=stv6120_write_reg(STV6120_CTRL7,
-                                                 (p<<STV6120_CTRL7_PDIV_SHIFT) |
-                                                 ctrl7                         ); /* put back in RCCLKOFF_1 as well */
+            if(lock_attempts == 1)
+            {
+                printf("Flow: Last attempt, so decrementing frequency by 1KHz to kick PLL\n");
 
-        if (err==ERROR_NONE) err=stv6120_write_reg(STV6120_CTRL8,
-                                                 (cfhf << STV6120_CTRL8_CFHF_SHIFT) |
-                                                 ctrl8                              );
-    } else { /* tuner=TUNER_2 */ 
-        if (err==ERROR_NONE) err=stv6120_write_reg(STV6120_CTRL16,
-                                                 (p<<STV6120_CTRL7_PDIV_SHIFT) |
-                                                 ctrl16                        ); /* put back in RCCLKOFF_2 as well */
-        if (err==ERROR_NONE) err=stv6120_write_reg(STV6120_CTRL17,
-                                                 (cfhf << STV6120_CTRL8_CFHF_SHIFT) |
-                                                 ctrl17                             );
-    }
+                freq = freq - 1;
+                stv6120_calc_pll(freq, &p, &f_vco, &n, &f, &icp, &cfhf);
 
-    /* if we change the filter re-cal it, and if we change VCO we have to re-cal it, so here goes */
-    if (err==ERROR_NONE) err=stv6120_write_reg(tuner==TUNER_1 ? STV6120_STAT1 : STV6120_STAT2,
-                                            (STV6120_STAT1_CALVCOSTRT_START << STV6120_STAT1_CALVCOSTRT_SHIFT) | /* start CALVCOSTRT */
-                                            STV6120_STAT1_RESERVED                                             );
+                printf("      Status: tuner:%i, f_vco=0x%x, icp=0x%x, f=0x%x, n=0x%x,\n",tuner,f_vco,icp,f,n);
+                printf("              rdiv=0x%x, p=0x%x, freq=%i, cfhf=%i\n",rdiv,p,freq,stv6120_cfhf[cfhf]);
+            }
 
-    /* wait for CALVCOSTRT bit to go low to say VCO cal is finished */
-    if (err==ERROR_NONE) {
-        timeout=0;
-        do {
-            err=stv6120_read_reg(tuner==TUNER_1 ? STV6120_STAT1 : STV6120_STAT2, &val);
-            timeout++;
-        } while ((err==ERROR_NONE) &&
-                 (timeout<STV6120_CAL_TIMEOUT) && 
-                 ((val & (1<<STV6120_STAT1_CALVCOSTRT_SHIFT))!=(STV6120_STAT1_CALVCOSTRT_FINISHED << STV6120_STAT1_CALVCOSTRT_SHIFT)));
-        if ((err==ERROR_NONE) && (timeout==STV6120_CAL_TIMEOUT)) {
-            printf("ERROR: tuner wait on CAL timed out\n");
-            err=ERROR_TUNER_CAL_TIMEOUT;
+            /* Reset error */
+            err=ERROR_NONE;
         }
-    }
 
-    /* wait for LOCK bit to go high to say PLL is locked */
-    if (err==ERROR_NONE) {
-        timeout=0;
-        do {
-            err=stv6120_read_reg(tuner==TUNER_1 ? STV6120_STAT1 : STV6120_STAT2, &val);
-            timeout++;
-        } while ((err==ERROR_NONE) &&
-                 (timeout<STV6120_CAL_TIMEOUT) &&
-                 ((val & (1<<STV6120_STAT1_LOCK_SHIFT)) != (STV6120_STAT1_LOCK_LOCKED << STV6120_STAT1_LOCK_SHIFT)));
-        if ((err==ERROR_NONE) && (timeout==STV6120_CAL_TIMEOUT)) {
-            printf("ERROR: tuner wait on lock timed out\n");
-            err=ERROR_TUNER_LOCK_TIMEOUT;
+        /* now we fill in the PLL and ICP values */
+        if (err==ERROR_NONE) err=stv6120_write_reg(tuner==TUNER_1 ? STV6120_CTRL3 : STV6120_CTRL12,
+                                                (n & 0x00ff)               );      /* set N[7:0] */
+        if (err==ERROR_NONE) err=stv6120_write_reg(tuner==TUNER_1 ? STV6120_CTRL4 : STV6120_CTRL13,
+                                                ((f & 0x0000007f) << 1)    |       /* set F[6:0] */
+                                                ((n & 0x0100)   >> 8)      );      /* N[8] */
+        if (err==ERROR_NONE) err=stv6120_write_reg(tuner==TUNER_1 ? STV6120_CTRL5 : STV6120_CTRL14,
+                                                ((f & 0x00007f80) >> 7)    );      /* set F[14:7] */
+        if (err==ERROR_NONE) err=stv6120_write_reg(tuner==TUNER_1 ? STV6120_CTRL6 : STV6120_CTRL15,
+                                                ((f & 0x00038000) >> 15)   |       /* set f[17:15] */
+                                                (icp << STV6120_CTRL6_ICP_SHIFT) | /* ICP[2:0] */
+                                                STV6120_CTRL6_RESERVED     );      /* reserved bit */
+
+        if (tuner==TUNER_1) {
+            if (err==ERROR_NONE) err=stv6120_write_reg(STV6120_CTRL7,
+                                                     (p<<STV6120_CTRL7_PDIV_SHIFT) |
+                                                     ctrl7                         ); /* put back in RCCLKOFF_1 as well */
+
+            if (err==ERROR_NONE) err=stv6120_write_reg(STV6120_CTRL8,
+                                                     (cfhf << STV6120_CTRL8_CFHF_SHIFT) |
+                                                     ctrl8                              );
+        } else { /* tuner=TUNER_2 */ 
+            if (err==ERROR_NONE) err=stv6120_write_reg(STV6120_CTRL16,
+                                                     (p<<STV6120_CTRL7_PDIV_SHIFT) |
+                                                     ctrl16                        ); /* put back in RCCLKOFF_2 as well */
+            if (err==ERROR_NONE) err=stv6120_write_reg(STV6120_CTRL17,
+                                                     (cfhf << STV6120_CTRL8_CFHF_SHIFT) |
+                                                     ctrl17                             );
         }
+
+        /* if we change the filter re-cal it, and if we change VCO we have to re-cal it, so here goes */
+        if (err==ERROR_NONE) err=stv6120_write_reg(tuner==TUNER_1 ? STV6120_STAT1 : STV6120_STAT2,
+                                                (STV6120_STAT1_CALVCOSTRT_START << STV6120_STAT1_CALVCOSTRT_SHIFT) | /* start CALVCOSTRT */
+                                                STV6120_STAT1_RESERVED                                             );
+
+        /* wait for CALVCOSTRT bit to go low to say VCO cal is finished */
+        if (err==ERROR_NONE) {
+            timeout=monotonic_ms()+STV6120_CAL_TIMEOUT_MS;
+            do {
+                err=stv6120_read_reg(tuner==TUNER_1 ? STV6120_STAT1 : STV6120_STAT2, &val);
+            } while ((err==ERROR_NONE) &&
+                     (monotonic_ms()<timeout) &&
+                     ((val & (1<<STV6120_STAT1_CALVCOSTRT_SHIFT))!=(STV6120_STAT1_CALVCOSTRT_FINISHED << STV6120_STAT1_CALVCOSTRT_SHIFT)));
+            if ((err==ERROR_NONE) && (monotonic_ms()>=timeout)) {
+                printf("ERROR: tuner wait on CAL timed out\n");
+                err=ERROR_TUNER_CAL_TIMEOUT;
+            }
+            else
+            {
+                printf("Debug: VCO Cal took: %"PRIu64"ms\n", (monotonic_ms() - (timeout - STV6120_CAL_TIMEOUT_MS)));
+            }
+        }
+
+        /* wait for LOCK bit to go high to say PLL is locked */
+        if (err==ERROR_NONE) {
+            timeout=monotonic_ms()+STV6120_PLL_TIMEOUT_MS;
+            do {
+                err=stv6120_read_reg(tuner==TUNER_1 ? STV6120_STAT1 : STV6120_STAT2, &val);
+            } while ((err==ERROR_NONE) &&
+                     (monotonic_ms()<timeout) &&
+                     ((val & (1<<STV6120_STAT1_LOCK_SHIFT)) != (STV6120_STAT1_LOCK_LOCKED << STV6120_STAT1_LOCK_SHIFT)));
+            if ((err==ERROR_NONE) && (monotonic_ms()>=timeout)) {
+                printf("ERROR: tuner wait on lock timed out\n");
+                err=ERROR_TUNER_LOCK_TIMEOUT;
+            }
+            else
+            {
+                printf("Debug: PLL Lock took: %"PRIu64"ms\n", (monotonic_ms() - (timeout - STV6120_PLL_TIMEOUT_MS)));
+            }
+        }
+        lock_attempts--;
     }
 
-    if (err!=ERROR_NONE) printf("ERROR: Tuner set freq %i\n",freq);
+    if (err!=ERROR_NONE) printf("ERROR: Tuner set freq %i failed\n",freq);
 
     return err;
 }

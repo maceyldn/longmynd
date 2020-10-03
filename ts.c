@@ -72,6 +72,7 @@ void *loop_ts(void *arg) {
     thread_vars_t *thread_vars=(thread_vars_t *)arg;
     uint8_t *err = &thread_vars->thread_err;
     longmynd_config_t *config = thread_vars->config;
+    longmynd_status_t *status = thread_vars->status;
 
     uint8_t *buffer;
     uint16_t len=0;
@@ -99,6 +100,20 @@ void *loop_ts(void *arg) {
             do {
                 if (*err==ERROR_NONE) *err=ftdi_usb_ts_read(buffer, &len, TS_FRAME_SIZE);
             } while (*err==ERROR_NONE && len>2);
+
+            pthread_mutex_lock(&status->mutex);
+                
+            status->service_name[0] = '\0';
+            status->service_provider_name[0] = '\0';
+            status->ts_null_percentage = 100;
+            status->ts_packet_count_nolock = 0;
+
+            for (int j=0; j<NUM_ELEMENT_STREAMS; j++) {
+                status->ts_elementary_streams[j][0] = 0;
+            }
+
+            pthread_mutex_unlock(&status->mutex);
+
            config->ts_reset = false; 
         }
 
@@ -109,10 +124,10 @@ void *loop_ts(void *arg) {
         if ((*err==ERROR_NONE) && (len>2)) {
             ts_write(&buffer[2],len-2);
 
-            if(longmynd_ts_parse_buffer.waiting && longmynd_ts_parse_buffer.buffer != NULL)
-            {                
-                pthread_mutex_lock(&longmynd_ts_parse_buffer.mutex);
-
+            if(longmynd_ts_parse_buffer.waiting
+                && longmynd_ts_parse_buffer.buffer != NULL
+                && pthread_mutex_trylock(&longmynd_ts_parse_buffer.mutex) == 0)
+            {
                 memcpy(longmynd_ts_parse_buffer.buffer, &buffer[2],len-2);
                 longmynd_ts_parse_buffer.length = len-2;
                 pthread_cond_signal(&longmynd_ts_parse_buffer.signal);
@@ -120,7 +135,10 @@ void *loop_ts(void *arg) {
 
                 pthread_mutex_unlock(&longmynd_ts_parse_buffer.mutex);
             }
+
+            status->ts_packet_count_nolock += (len-2);
         }
+
     }
 
     free(buffer);

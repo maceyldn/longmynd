@@ -64,7 +64,9 @@
 
 static longmynd_config_t longmynd_config = {
     .new = false,
-    .mutex = PTHREAD_MUTEX_INITIALIZER
+    .mutex = PTHREAD_MUTEX_INITIALIZER,
+    .freq_index = 0,
+    .sr_index = 0
 };
 
 static longmynd_status_t longmynd_status = {
@@ -72,7 +74,8 @@ static longmynd_status_t longmynd_status = {
     .service_provider_name = "\0",
     .last_updated_monotonic = 0,
     .mutex = PTHREAD_MUTEX_INITIALIZER,
-    .signal = PTHREAD_COND_INITIALIZER
+    .signal = PTHREAD_COND_INITIALIZER,
+    .ts_packet_count_nolock = 0
 };
 
 static pthread_t thread_ts_parse;
@@ -85,48 +88,43 @@ static pthread_t thread_rcv;
 /* ----------------- ROUTINES ----------------------------------------------------------------------- */
 /* -------------------------------------------------------------------------------------------------- */
 
-/* -------------------------------------------------------------------------------------------------- */
-uint64_t timestamp_ms(void) {
-/* -------------------------------------------------------------------------------------------------- */
-/* Returns the current unix timestamp in milliseconds                                                 */
-/* return: unix timestamp in milliseconds                                                             */
-/* -------------------------------------------------------------------------------------------------- */
-    struct timespec tp;
-
-    if(clock_gettime(CLOCK_REALTIME, &tp) != 0)
-    {
-        return 0;
-    }
-
-    return (uint64_t) tp.tv_sec * 1000 + tp.tv_nsec / 1000000;
-}
-
+/* NB: This overwrites any multiple-frequency config */
 void config_set_frequency(uint32_t frequency)
 {
     if (frequency <= 2450000 && frequency >= 144000)
     {
         pthread_mutex_lock(&longmynd_config.mutex);
 
-        longmynd_config.freq_requested = frequency;
+        longmynd_config.freq_requested[0] = frequency;
+        longmynd_config.freq_requested[1] = 0;
+        longmynd_config.freq_requested[2] = 0;
+        longmynd_config.freq_requested[3] = 0;
+        longmynd_config.freq_index = 0;
         longmynd_config.new = true;
 
         pthread_mutex_unlock(&longmynd_config.mutex);
     }
 }
 
+/* NB: This overwrites any multiple-symbolrate config */
 void config_set_symbolrate(uint32_t symbolrate)
 {
     if (symbolrate <= 27500 && symbolrate >= 33)
     {
         pthread_mutex_lock(&longmynd_config.mutex);
 
-        longmynd_config.sr_requested = symbolrate;
+        longmynd_config.sr_requested[0] = symbolrate;
+        longmynd_config.sr_requested[1] = 0;
+        longmynd_config.sr_requested[2] = 0;
+        longmynd_config.sr_requested[3] = 0;
+        longmynd_config.sr_index = 0;
         longmynd_config.new = true;
 
         pthread_mutex_unlock(&longmynd_config.mutex);
     }
 }
 
+/* NB: This overwrites any multiple-frequency or multiple-symbolrate config */
 void config_set_frequency_and_symbolrate(uint32_t frequency, uint32_t symbolrate)
 {
     if (frequency <= 2450000 && frequency >= 144000
@@ -134,8 +132,18 @@ void config_set_frequency_and_symbolrate(uint32_t frequency, uint32_t symbolrate
     {
         pthread_mutex_lock(&longmynd_config.mutex);
 
-        longmynd_config.freq_requested = frequency;
-        longmynd_config.sr_requested = symbolrate;
+        longmynd_config.freq_requested[0] = frequency;
+        longmynd_config.freq_requested[1] = 0;
+        longmynd_config.freq_requested[2] = 0;
+        longmynd_config.freq_requested[3] = 0;
+        longmynd_config.freq_index = 0;
+
+        longmynd_config.sr_requested[0] = symbolrate;
+        longmynd_config.sr_requested[1] = 0;
+        longmynd_config.sr_requested[2] = 0;
+        longmynd_config.sr_requested[3] = 0;
+        longmynd_config.sr_index = 0;
+
         longmynd_config.new = true;
 
         pthread_mutex_unlock(&longmynd_config.mutex);
@@ -153,13 +161,38 @@ void config_set_lnbv(bool enabled, bool horizontal)
     pthread_mutex_unlock(&longmynd_config.mutex);
 }
 
-void config_reinit(void)
+void config_reinit(bool increment_frsr)
 {
     pthread_mutex_lock(&longmynd_config.mutex);
+
+    if(increment_frsr)
+    {
+        /* Cycle symbolrate for a given frequency */
+        do {
+            /* Increment modulus 4 */
+            longmynd_config.sr_index = (longmynd_config.sr_index + 1) & 0x3;
+            /* Check if we've just cycled all symbolrates */
+            if(longmynd_config.sr_index == 0) {
+                /* Cycle frequences once we've tried all symbolrates */
+                do {
+                    /* Increment modulus 4 */
+                    longmynd_config.freq_index = (longmynd_config.freq_index + 1) & 0x3;
+                } while (longmynd_config.freq_requested[longmynd_config.freq_index] == 0);
+            }
+        } while (longmynd_config.sr_requested[longmynd_config.sr_index] == 0);
+    }
 
     longmynd_config.new = true;
 
     pthread_mutex_unlock(&longmynd_config.mutex);
+
+    if(increment_frsr)
+    {
+        printf("Flow: Config cycle: Frequency [%d] = %d KHz, Symbol Rate [%d] = %d KSymbols/s\n",
+            longmynd_config.freq_index, longmynd_config.freq_requested[longmynd_config.freq_index],
+            longmynd_config.sr_index, longmynd_config.sr_requested[longmynd_config.sr_index]
+        );
+    }
 }
 
 /* -------------------------------------------------------------------------------------------------- */
@@ -204,6 +237,7 @@ uint8_t process_command_line(int argc, char *argv[], longmynd_config_t *config) 
     strcpy(config->status_fifo_path, "longmynd_main_status");
     config->polarisation_supply=false;
     char polarisation_str[8];
+    config->ts_timeout = 5*1000;
 
     param=1;
     while (param<argc-2) {
@@ -215,7 +249,7 @@ uint8_t process_command_line(int argc, char *argv[], longmynd_config_t *config) 
                 main_usb_set=true;
                 break;
             case 'i':
-                strncpy(config->ts_ip_addr,argv[param++], 16);
+                strncpy(config->ts_ip_addr,argv[param++], (16-1));
                 config->ts_ip_port=(uint16_t)strtol(argv[param],NULL,10);
                 config->ts_use_ip=true;
                 ts_ip_set = true;
@@ -225,22 +259,22 @@ uint8_t process_command_line(int argc, char *argv[], longmynd_config_t *config) 
                 config->control_port=(uint16_t)strtol(argv[param],NULL,10);
                 config->use_control=true;
                 break;
-	  case 't':
-                strncpy(config->ts_fifo_path, argv[param], 128);
+            case 't':
+                strncpy(config->ts_fifo_path, argv[param], (128-1));
                 ts_fifo_set=true;
                 break;
             case 'I':
-                strncpy(config->status_ip_addr,argv[param++], 16);
+                strncpy(config->status_ip_addr,argv[param++], (16-1));
                 config->status_ip_port=(uint16_t)strtol(argv[param],NULL,10);
                 config->status_use_ip=true;
                 status_ip_set = true;
                 break;
             case 's':
-                strncpy(config->status_fifo_path, argv[param], 128);
+                strncpy(config->status_fifo_path, argv[param], (128-1));
                 status_fifo_set=true;
                 break;
             case 'p':
-                strncpy(polarisation_str, argv[param], 8);
+                strncpy(polarisation_str, argv[param], (8-1));
                 config->polarisation_supply=true;
                 break;
             case 'w':
@@ -250,6 +284,9 @@ uint8_t process_command_line(int argc, char *argv[], longmynd_config_t *config) 
             case 'b':
                 config->beep_enabled=true;
                 param--; /* there is no data for this so go back */
+                break;
+            case 'r':
+                config->ts_timeout=strtol(argv[param],NULL,10);
                 break;
           }
         }
@@ -262,16 +299,75 @@ uint8_t process_command_line(int argc, char *argv[], longmynd_config_t *config) 
     }
 
     if (err==ERROR_NONE) {
-        config->freq_requested =(uint32_t)strtol(argv[param++],NULL,10);
-        if(config->freq_requested==0) {
-            err=ERROR_ARGS_INPUT;
-            printf("ERROR: Main Frequency not in a valid format.\n");
-        }
+        /* Parse frequencies requested */
+        char *arg_ptr = argv[param];
+        char *comma_ptr;
+        for(int i = 0; (i < 4) && (err == ERROR_NONE); i++)
+        {
+            /* Look for comma */
+            comma_ptr = strchr(arg_ptr, ',');
+            if(comma_ptr != NULL)
+            {
+                /* Set comma to NULL to end string here */
+                *comma_ptr = '\0';
+            }
 
-        config->sr_requested =(uint32_t)strtol(argv[param  ],NULL,10);
-        if(config->sr_requested==0) {
-            err=ERROR_ARGS_INPUT;
-            printf("ERROR: Main Symbol Rate not in a valid format.\n");
+            /* Parse up to NULL */
+            config->freq_requested[i] = (uint32_t)strtol(arg_ptr,NULL,10);
+
+            if(config->freq_requested[i] == 0) {
+                err=ERROR_ARGS_INPUT;
+                printf("ERROR: Main Frequency not in a valid format.\n");
+            }
+
+            if(comma_ptr == NULL)
+            {
+                /* No further commas, zero out rest of the config */
+                for(i++; i < 4; i++)
+                {
+                    config->freq_requested[i] = 0;
+                }
+                /* Implicit drop out of wider loop here */
+            }
+            else
+            {
+                /* Move arg_ptr to other side of the comma and carry on */
+                arg_ptr = comma_ptr + sizeof(char);
+            }
+        }
+        param++;
+    }
+
+    if (err==ERROR_NONE) {
+        /* Parse Symbolrates requested */
+        char *arg_ptr = argv[param];
+        char *comma_ptr;
+        for(int i = 0; (i < 4) && (err == ERROR_NONE); i++) {
+            /* Look for comma */
+            comma_ptr = strchr(arg_ptr, ',');
+            if(comma_ptr != NULL) {
+                /* Set comma to NULL to end string here */
+                *comma_ptr = '\0';
+            }
+
+            /* Parse up to NULL */
+            config->sr_requested[i] = (uint32_t)strtol(arg_ptr,NULL,10);
+
+            if(config->sr_requested[0] == 0) {
+                err=ERROR_ARGS_INPUT;
+                printf("ERROR: Main Symbol Rate not in a valid format.\n");
+            }
+
+            if(comma_ptr == NULL) {
+                /* No further commas, zero out rest of the config */
+                for(i++; i < 4; i++) {
+                    config->sr_requested[i] = 0;
+                }
+                /* Implicit drop out of wider loop here */
+            } else {
+                /* Move arg_ptr to other side of the comma and carry on */
+                arg_ptr = comma_ptr + sizeof(char);
+            }
         }
     }
 
@@ -291,19 +387,59 @@ uint8_t process_command_line(int argc, char *argv[], longmynd_config_t *config) 
     }
 
     if (err==ERROR_NONE) {
-        if (config->freq_requested>2450000) {
+        /* Check first frequency given */
+        if (config->freq_requested[0]>2450000) {
             err=ERROR_ARGS_INPUT;
-            printf("ERROR: Freq must be <= 2450 MHz\n");
-        } else if (config->freq_requested<144) {
+            printf("ERROR: Freq (%d) must be <= 2450 MHz\n", config->freq_requested[0]);
+        } else if (config->freq_requested[0]<144000) {
             err=ERROR_ARGS_INPUT;
-            printf("ERROR: Freq_must be >= 144 MHz\n");
-        } else if (config->sr_requested>27500) {
+            printf("ERROR: Freq (%d) must be >= 144 MHz\n", config->freq_requested[0]);
+        } else if (config->freq_requested[1] != 0) {
+            /* A frequency list have been given */
+            if (config->ts_timeout == -1) {
+                err=ERROR_ARGS_INPUT;
+                printf("ERROR: TS Timeout must be enabled when multiple frequencies are specified.\n");
+            }
+            /* Then check the other given frequencies */
+            for(int i = 1; (i < 4) && (config->freq_requested[i] != 0); i++) {
+                if (config->freq_requested[i]>2450000) {
+                    err=ERROR_ARGS_INPUT;
+                    printf("ERROR: Freq (%d) must be <= 2450 MHz\n", config->freq_requested[i]);
+                } else if (config->freq_requested[i]<144000) {
+                    err=ERROR_ARGS_INPUT;
+                    printf("ERROR: Freq (%d) must be >= 144 MHz\n", config->freq_requested[i]);
+                }
+            }
+        }
+    }
+    if (err==ERROR_NONE) {
+        /* Check first symbolrate given */
+        if (config->sr_requested[0]>27500) {
             err=ERROR_ARGS_INPUT;
-            printf("ERROR: SR must be <= 27 Msymbols/s\n");
-        } else if (config->sr_requested<33) {
+            printf("ERROR: SR (%d) must be <= 27 Msymbols/s\n", config->sr_requested[0]);
+        } else if (config->sr_requested[0]<33) {
             err=ERROR_ARGS_INPUT;
-            printf("ERROR: SR must be >= 33 Ksymbols/s\n");
-        } else if (ts_ip_set && ts_fifo_set) {
+            printf("ERROR: SR (%d) must be >= 33 Ksymbols/s\n", config->sr_requested[0]);
+        } else if (config->sr_requested[1] != 0) {
+            /* A symbolrate list has been given */
+            if (config->ts_timeout == -1) {
+                err=ERROR_ARGS_INPUT;
+                printf("ERROR: TS Timeout must be enabled when multiple symbolrates are specified.\n");
+            }
+            /* Then check the other given symbolrates */
+            for(int i = 1; (i < 4) && (config->sr_requested[i] != 0); i++) {
+                if (config->sr_requested[i]>27500) {
+                    err=ERROR_ARGS_INPUT;
+                    printf("ERROR: SR (%d) must be <= 27 Msymbols/s\n", config->sr_requested[i]);
+                } else if (config->sr_requested[i]<33) {
+                    err=ERROR_ARGS_INPUT;
+                    printf("ERROR: SR (%d) must be >= 33 Ksymbols/s\n", config->sr_requested[i]);
+                }
+            }
+        }
+    }
+    if (err==ERROR_NONE) {
+        if (ts_ip_set && ts_fifo_set) {
             err=ERROR_ARGS_INPUT;
             printf("ERROR: Cannot set TS FIFO and TS IP address\n");
         } else if (status_ip_set && status_fifo_set) {
@@ -312,9 +448,18 @@ uint8_t process_command_line(int argc, char *argv[], longmynd_config_t *config) 
         } else if (config->ts_use_ip && config->status_use_ip && (config->ts_ip_port == config->status_ip_port) && (0==strcmp(config->ts_ip_addr, config->status_ip_addr))) {
             err=ERROR_ARGS_INPUT;
             printf("ERROR: Cannot set Status IP & Port identical to TS IP & Port\n");
+        } else if (config->ts_timeout != -1 && config->ts_timeout<=500) {
+            err=ERROR_ARGS_INPUT;
+            printf("ERROR: TS Timeout if enabled must be >500ms.\n");
         } else { /* err==ERROR_NONE */
-             printf("      Status: Main Frequency=%i KHz\n",config->freq_requested);
-             printf("              Main Symbol Rate=%i KSymbols/s\n",config->sr_requested);
+             printf("      Status: Main Frequency=%i KHz\n",config->freq_requested[0]);
+             for(int i = 1; (i < 4) && (config->freq_requested[i] != 0); i++) {
+                printf("              Alternative Frequency=%i KHz\n",config->freq_requested[i]);
+             }
+             printf("              Main Symbol Rate=%i KSymbols/s\n",config->sr_requested[0]);
+             for(int i = 1; (i < 4) && (config->sr_requested[i] != 0); i++) {
+                printf("              Alternative Symbol Rate=%i KSymbols/s\n",config->sr_requested[i]);
+             }
              if (!main_usb_set)       printf("              Using First Minitiouner detected on USB\n");
              else                     printf("              USB bus/device=%i,%i\n",config->device_usb_bus,config->device_usb_addr);
 
@@ -330,6 +475,8 @@ uint8_t process_command_line(int argc, char *argv[], longmynd_config_t *config) 
              else                     printf("              Main refers to TOP F-Type\n");
              if (config->beep_enabled) printf("              MER Beep enabled\n");
              if (config->polarisation_supply) printf("              Polarisation Voltage Supply enabled: %s\n", (config->polarisation_horizontal ? "H, 18V" : "V, 13V"));
+             if (config->ts_timeout != -1) printf("              TS Timeout Period =%i milliseconds\n",config->ts_timeout);
+             else                          printf("              TS Timeout Disabled.\n");
         }
     }
 
@@ -431,13 +578,17 @@ void *loop_i2c(void *arg) {
     longmynd_config_t config_cpy;
     longmynd_status_t status_cpy;
 
-    uint64_t last_i2c_loop = timestamp_ms();
+    uint32_t last_ts_packet_count = 0;
+
+    uint64_t last_i2c_loop = monotonic_ms();
     while (*err==ERROR_NONE && *thread_vars->main_err_ptr==ERROR_NONE) {
         /* Receiver State Machine Loop Timer */
         do {
             /* Sleep for at least 10ms */
             usleep(10*1000);
-        } while (timestamp_ms() < (last_i2c_loop + I2C_LOOP_MS));
+        } while (monotonic_ms() < (last_i2c_loop + I2C_LOOP_MS));
+
+        status_cpy.last_ts_or_reinit_monotonic = 0;
 
         /* Check if there's a new config */
         if(thread_vars->config->new)
@@ -452,13 +603,15 @@ void *loop_i2c(void *arg) {
             thread_vars->config->ts_reset = true;
             pthread_mutex_unlock(&thread_vars->config->mutex);
 
-            status_cpy.frequency_requested = config_cpy.freq_requested;
+            status_cpy.frequency_requested = config_cpy.freq_requested[config_cpy.freq_index];
+            status_cpy.symbolrate_requested = config_cpy.sr_requested[config_cpy.sr_index];
+
             /* init all the modules */
             if (*err==ERROR_NONE) *err=nim_init();
             /* we are only using the one demodulator so set the other to 0 to turn it off */
-            if (*err==ERROR_NONE) *err=stv0910_init(config_cpy.sr_requested,0);
+            if (*err==ERROR_NONE) *err=stv0910_init(config_cpy.sr_requested[config_cpy.sr_index],0);
             /* we only use one of the tuners in STV6120 so freq for tuner 2=0 to turn it off */
-            if (*err==ERROR_NONE) *err=stv6120_init(config_cpy.freq_requested,0,config_cpy.port_swap);
+            if (*err==ERROR_NONE) *err=stv6120_init(config_cpy.freq_requested[config_cpy.freq_index],0,config_cpy.port_swap);
             /* we turn on the LNA we want and turn the other off (if they exist) */
             if (*err==ERROR_NONE) *err=stvvglna_init(NIM_INPUT_TOP,    (config_cpy.port_swap) ? STVVGLNA_OFF : STVVGLNA_ON,  &status_cpy.lna_ok);
             if (*err==ERROR_NONE) *err=stvvglna_init(NIM_INPUT_BOTTOM, (config_cpy.port_swap) ? STVVGLNA_ON  : STVVGLNA_OFF, &status_cpy.lna_ok);
@@ -478,7 +631,7 @@ void *loop_i2c(void *arg) {
                 status_cpy.state=STATE_DEMOD_HUNTING;
             }
 
-            status_cpy.last_lock_or_init_monotonic = monotonic_ms();
+            status_cpy.last_ts_or_reinit_monotonic = monotonic_ms();
         }
 
         /* Main receiver state machine */
@@ -564,10 +717,12 @@ void *loop_i2c(void *arg) {
                 break;
         }
 
-        if(status_cpy.state == STATE_DEMOD_S
-            || status_cpy.state == STATE_DEMOD_S2)
+
+        if(status->ts_packet_count_nolock > 0
+            && last_ts_packet_count != status->ts_packet_count_nolock)
         {
-            status_cpy.last_lock_or_init_monotonic = monotonic_ms();
+            status_cpy.last_ts_or_reinit_monotonic = monotonic_ms();
+            last_ts_packet_count = status->ts_packet_count_nolock;
         }
 
         /* Copy local status data over global object */
@@ -584,6 +739,7 @@ void *loop_i2c(void *arg) {
         status->frequency_offset = status_cpy.frequency_offset;
         status->polarisation_supply = status_cpy.polarisation_supply;
         status->polarisation_horizontal = status_cpy.polarisation_horizontal;
+        status->symbolrate_requested = status_cpy.symbolrate_requested;
         status->symbolrate = status_cpy.symbolrate;
         status->viterbi_error_rate = status_cpy.viterbi_error_rate;
         status->bit_error_rate = status_cpy.bit_error_rate;
@@ -596,7 +752,9 @@ void *loop_i2c(void *arg) {
         status->modcod = status_cpy.modcod;
         status->short_frame = status_cpy.short_frame;
         status->pilots = status_cpy.pilots;
-        status->last_lock_or_init_monotonic = status_cpy.last_lock_or_init_monotonic;
+        if(status_cpy.last_ts_or_reinit_monotonic != 0) {
+            status->last_ts_or_reinit_monotonic = status_cpy.last_ts_or_reinit_monotonic;
+        }
 
         /* Set monotonic value to signal new data */
         status->last_updated_monotonic = monotonic_ms();
@@ -604,7 +762,7 @@ void *loop_i2c(void *arg) {
         pthread_cond_signal(&status->signal);
         pthread_mutex_unlock(&status->mutex);
 
-        last_i2c_loop = timestamp_ms();
+        last_i2c_loop = monotonic_ms();
     }
     return NULL;
 }
@@ -799,6 +957,11 @@ int main(int argc, char *argv[]) {
     uint64_t last_status_sent_monotonic = 0;
     longmynd_status_t longmynd_status_cpy;
 
+    /* Initialise TS data re-init timer to prevent immediate reset */
+    pthread_mutex_lock(&longmynd_status.mutex);
+    longmynd_status.last_ts_or_reinit_monotonic = monotonic_ms();
+    pthread_mutex_unlock(&longmynd_status.mutex);
+
     while (err==ERROR_NONE) {
         /* Test if new status data is available */
         if(longmynd_status.last_updated_monotonic != last_status_sent_monotonic) {
@@ -827,15 +990,16 @@ int main(int argc, char *argv[]) {
             err=ERROR_THREAD_ERROR;
         }
 
-        if(monotonic_ms() > (longmynd_status.last_lock_or_init_monotonic + LOCK_REINIT_TIMER))
+        if(longmynd_config.ts_timeout != -1
+        	&& monotonic_ms() > (longmynd_status.last_ts_or_reinit_monotonic + longmynd_config.ts_timeout))
         {
-            /* Had a while with no lock, reinit config to pull NIM search loops back in */
-            printf("Flow: No-lock timeout, re-init config.\n");
-            config_reinit();
+            /* Had a while with no TS data, reinit config to pull NIM search loops back in, or fix -S fascination */
+            printf("Flow: No-data timeout, re-init config.\n");
+            config_reinit(true);
 
             /* We've queued up a reinit so reset the timer */
             pthread_mutex_lock(&longmynd_status.mutex);
-            longmynd_status.last_lock_or_init_monotonic = monotonic_ms();
+            longmynd_status.last_ts_or_reinit_monotonic = monotonic_ms();
             pthread_mutex_unlock(&longmynd_status.mutex);
         }
     }
