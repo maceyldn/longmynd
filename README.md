@@ -1,8 +1,9 @@
-# Longmynd [![Build Status](https://travis-ci.org/myorangedragon/longmynd.svg?branch=master)](https://travis-ci.org/myorangedragon/longmynd)
+# Longmynd
 
 An Open Source Linux ATV Receiver.
 
 Copyright 2019 Heather Lomond
+
 Additional 2020 Andy Mace
 
 ## Dependencies
@@ -13,23 +14,27 @@ To run longmynd without requiring root, unplug the minitiouner and then install 
 
     sudo cp minitiouner.rules /etc/udev/rules.d/
 
+To run longmynd standalone, install supervisord
+
+    sudo apt-get install supervisor
+
 ## Compile
 
-    make
+    mkdir build
+    cd build
+    cmake ../
+    make && make install
 
 ## Run
 
-Please refer to the longmynd manual page via:
-
-```
-man -l longmynd.1
-```
-
-./longmynd -c 239.100.100.1 6789 -i 239.100.100.21 5000 -I 239.100.100.21 5001 741500 1500
+    ./longmynd -c 239.100.100.1 6789 -i 239.100.100.21 5000 -I 239.100.100.21 5001 741500 1500
 
 -c Listen for Control on 239.100.100.1 6789
+
 -i TS data to 239.100.100.21 5000
+
 -I State to 239.100.100.21 5001
+
 741500 1500 tune to beacon
 
 
