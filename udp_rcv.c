@@ -91,7 +91,7 @@ void *loop_rcv(void *arg) {
     uint32_t freq = (p->frequency - p->offset);
     config_set_frequency_and_symbolrate(freq, p->SRate);
     config_set_lnbv(p->Voltage, p->khz);
-    config_reinit();
+    config_reinit(false);
     
     printf("Retune: %s", message);
   }
